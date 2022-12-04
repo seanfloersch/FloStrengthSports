@@ -1,0 +1,12 @@
+---
+title: "NFL"
+---
+```{r, echo=FALSE, message=FALSE}
+library(tidyverse)
+library(knitr)
+ncaaftop25<- read.csv("/Users/seanfloersch/FloStrength/NCAAFFloStrength/NCAAFMasterDF") %>%
+  slice(1:25) %>%
+  mutate(Rank = c(1:25)) %>%
+  select(Rank, Conference,Team, W, L, FloStrength)
+kable(ncaaftop25)
+```

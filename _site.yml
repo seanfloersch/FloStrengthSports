@@ -6,6 +6,8 @@ navbar:
       href: index.html
     - text: "About"
       href: about.html
+    - text: "NFL"
+      href: NFL.html
 output:
   html_document:
     theme: flatly
