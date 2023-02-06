@@ -1,0 +1,364 @@
+---
+title: "FloStrengthUpdate"
+author: "Sean Floersch"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(rvest)
+library(tidyverse)
+library(optmatch)
+library(stringr)
+library(ggplot2)
+library(e1071)
+library(rpart)
+library(randomForest)
+library(caret)
+library(gridExtra)
+library(gbm)
+library(neuralnet)
+library(reactable)
+library(DT)
+
+ncaabtod = "yes"
+ncaabyest = "yes"
+isthereNBAtoday <- "yes"
+wasthereNBAyesterday <- "yes"
+isNHLtoday <- "no"
+wasNHLyest <- "no"
+nflweek = 21 ## update on thursdayy
+cfweek = 15 ## update on Tuesday
+dayofweek <- date() %>% str_extract("[A-Z][a-z]{1,3}")
+```
+
+```{r dailyschedule}
+getSchedule<- function(x){
+  getDate <- function(x){
+    x <- Sys.Date()
+    x <- str_remove_all(x, "-")
+    return(x)
+  }
+  date=getDate()
+  year <- str_extract(date, "\\d{1,4}")
+  month <- str_extract(date, "\\d{5,6}") 
+  month = str_extract(month, "\\d{1,2}$")
+  day <- str_extract(date, "\\d{1,2}$")
+  date <- str_c(year,month,day, sep = "-")
+  ####nba
+    h <- read_html(str_c("https://www.nba.com/games?date=", date)) 
+    Away <- html_nodes(h, ".GameCardMatchup_article__Fsvx9:nth-child(1) .MatchupCardTeamName_teamName__9YaBA") %>% html_text
+    Home <- html_nodes(h, ".GameCardMatchup_statusWrapper__TDbQz+ .GameCardMatchup_article__Fsvx9 .MatchupCardTeamName_teamName__9YaBA") %>% html_text
+    Time <- html_nodes(h, ".GameCardMatchupStatusText_gcsText__PcQUX") %>% html_text
+  
+    nba<- data.frame(Away,Home,Time) %>%
+      mutate(Sport = "NBA")
+  ####nhl
+   nhl <- read.csv("~/Downloads/2022_2023_NHL_Schedule.csv", header=FALSE) 
+   colnames(nhl)<- c("Date","Time","Away","Home")
+    yearnhl<- str_extract(year, "\\d{1,2}$")
+    monthnhl<- as.numeric(month)
+    daynhl<- as.numeric(day)
+    date<- str_c(monthnhl,daynhl,yearnhl, sep = "/")
+    nhl <- nhl %>% 
+      filter(Date == date) %>%
+      mutate(Sport = "NHL") %>%
+      select(Away,Home,Time,Sport)
+    df<- rbind(nba,nhl)
+  #############################ncaamb
+    date<- str_c(year,month,day, sep = "/")
+    h <- read_html(str_c("https://www.ncaa.com/scoreboard/basketball-men/d1/", date,"/all-conf")) 
+    Away <- html_nodes(h, "#scoreboardGames li:nth-child(1) .gamePod-game-team-name") %>% html_text
+    Home <- html_nodes(h, "#scoreboardGames li+ li .gamePod-game-team-name") %>% html_text
+    Time <- html_nodes(h, ".game-time") %>% html_text
+    ncaa<- data.frame(Away,Home) %>%
+        mutate(Sport = "NCAAMB")%>%
+      mutate(Time = NA)
+    
+    df<- rbind(nba,nhl,ncaa) %>%
+      mutate(Time = str_remove(Time, "ET"))%>%
+      mutate(Time = str_remove(Time, ":"))%>%
+      mutate(Time = str_remove(Time, "PM"))%>%
+      mutate(Time = str_remove(Time, "pm"))%>%
+      mutate(Time = as.numeric(str_remove(Time, "^0"))-100) %>%
+      mutate(Time = ifelse(Time==0,1200,Time)) %>%
+      mutate(Time = str_c(str_remove(Time,"\\d{1,2}$"),":",str_extract(Time,"\\d{1,2}$"), " PM CST"))
+}
+sched<-getSchedule(x)
+write_csv(sched,"/Users/seanfloersch/FloStrength/FloStrengthApp/TodSched")
+```
+
+```{r yestresults}
+getResults<- function(x){
+  getDate <- function(x){
+    x <- Sys.Date()-1
+    x <- str_remove_all(x, "-")
+    return(x)
+  }
+  date=getDate()
+  ####nba
+    h <- read_html(str_c("https://www.espn.com/nba/scoreboard/_/date/", date)) 
+    WTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .db") %>% html_text
+    LTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .db") %>% html_text
+    WScore <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .ScoreCell_Score--scoreboard") %>% html_text
+    LScore <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .ScoreCell_Score--scoreboard") %>% html_text
+    nba<- data.frame(WTeam,LTeam,WScore,LScore) %>%
+      mutate(Sport = "NBA") %>%
+      mutate(Score = str_c(WScore, LScore, sep="-")) %>%
+      select(WTeam,Score,LTeam,Sport)
+  ####nhl
+    h <- read_html(str_c("https://www.espn.com/nhl/scoreboard/_/date/", date)) 
+    WTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .db") %>% html_text
+    LTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .db") %>% html_text
+    WScore <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .ScoreCell_Score--scoreboard") %>% html_text
+    LScore <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .ScoreCell_Score--scoreboard") %>% html_text
+    nhl<- data.frame(WTeam,LTeam,WScore,LScore) %>%
+      mutate(Sport = "NHL") %>%
+      mutate(Score = str_c(WScore, LScore, sep="-")) %>%
+      select(WTeam,Score,LTeam,Sport)
+    df<- rbind(nba,nhl)
+  #############################ncaamb
+    h <- read_html(str_c("https://www.espn.com/mens-college-basketball/scoreboard/_/date/", date,"/seasontype/2/group/50")) 
+    WTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .db") %>% html_text
+    LTeam <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .db") %>% html_text
+    WScore <- html_nodes(h, ".ScoreboardScoreCell__Item--winner .ScoreCell_Score--scoreboard") %>% html_text
+    LScore <- html_nodes(h, ".ScoreboardScoreCell__Item--loser .ScoreCell_Score--scoreboard") %>% html_text
+    ncaa<- data.frame(WTeam,LTeam,WScore,LScore) %>%
+      mutate(Sport = "NCAAMB") %>%
+      mutate(Score = str_c(WScore, LScore, sep="-")) %>%
+      select(WTeam,Score,LTeam,Sport)
+    
+    df<- rbind(nba,nhl,ncaa) 
+}
+results<-getResults(x)
+write_csv(results,"/Users/seanfloersch/FloStrength/FloStrengthApp/YestResults")
+```
+
+```{r nfl}
+source("/Users/seanfloersch/FloStrength/FloStrengthApp/NFLFunctions.R")
+
+## update previous week
+if (dayofweek == "Thursss"){
+  NFLResults <- ComWeek(weeknum = nflweek, NFLResults)
+  NFLResults <- unique(NFLResults) %>%na.omit()
+  write_csv(NFLResults, "/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/NFL2022DF")
+  NFLOfficial <- addresults(NFLResults, NFLOfficial,nflweek)
+  NFLOfficial <- unique(NFLOfficial)
+  NFLOfficial <- na.omit(NFLOfficial)
+  write_csv(NFLOfficial, "/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/OfficialNFL2022")
+  NFLBetsDF <- addNFLBets(NFLBets, NFLResults) 
+  NFLBetsDF <- unique(NFLBetsDF)
+  write_csv(NFLBetsDF, "/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/NFLBetsDF")
+  nflmaster <- get_nfl_team(NFLResults)
+  write_csv(nflmaster,"/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/nflmaster22")
+  powerrank <- read.csv("/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/nflmaster22") %>% 
+    mutate(Rating = .15*FloPlayer + .3* FloSched + .5* FloTeam + .05*fspred) %>%
+    arrange(-Rating) %>%
+    mutate(Rank = c(1:32)) %>%
+    select(Rank, Team, Rating,"PlayerRating"=FloPlayer,"TeamRating"=FloTeam,"SchedRating"=FloSched,"PredRating"=fspred)
+  write_csv(powerrank,"/Users/seanfloersch/FloStrength/FloStrengthApp/NFLPowerRank")
+  getNFLPlayers()
+  getNFLModSuc()
+}
+## predict week
+if (dayofweek == "Friii"){
+  nflmaster <- read.csv("/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/nflmaster22")
+  predweek <- pred_current_week(nflweek, nflmaster)
+  write_csv(predweek, "/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/nflprevweekdf")
+  cleanweek <- clean_week_pred(predweek)
+  mldf <- mlpred(predweek)
+  write_csv(mldf, "/Users/seanfloersch/FloStrength/NFLFloStrength/NFLPlayerPred/nflMLpredict")
+  predNFLBets()
+}
+```
+
+```{r nba}
+source("/Users/seanfloersch/FloStrength/FloStrengthApp/NBAFunctions.R")
+  yestgameID <- getyestDate(x)
+
+if (wasthereNBAyesterday == "yes"){
+  NBAResults <- updateNBAyest(yestgameID) %>% na.omit
+  NBAResults <- unique(NBAResults)
+  write_csv(NBAResults, "/Users/seanfloersch/FloStrength/NBAFloStrength/ComNBAResults")
+  NBAModel <- updateNBAmod(NBAResults) %>% na.omit
+  NBAModel <- unique(NBAModel)
+  write_csv(NBAModel, "/Users/seanfloersch/FloStrength/NBAFloStrength/NBAModel")
+  NBABets <-read.csv("/Users/seanfloersch/FloStrength/NBAFloStrength/nbayestbetdf")
+  if (length(NBABets$Game)>0){
+    NBABetsDF <- updateNBAbets(NBABets, NBAResults)
+    write_csv(NBABetsDF, "/Users/seanfloersch/FloStrength/NBAFloStrength/NBABetsDF")
+  }
+}
+NBAPlayers <- getNBAplayers(2023)
+NBAMVP <- NBAPlayers %>% 
+  select(Player, Tm, Pos,Scoring, Passing, Rebounding, Defense, FloStrength, Value) %>%
+  mutate(Scoring = round(Scoring,3))%>%
+  mutate(Passing = round(Passing,3))%>%
+  mutate(Rebounding = round(Rebounding,3))%>%
+  mutate(Defense = round(Defense,3))%>%
+  mutate(FloStrength = round(FloStrength,3))%>%
+  mutate(Value = round(Value,3))
+NBATeams <- getNBATeam(2023)
+NBASched <- getNBAsched(NBATeams,NBAResults)
+NBAStreaks <- getStreaks(NBATeams, NBAResults)
+PowerRanking <- getNBArank(NBAPlayers, NBATeams, NBASched, NBAPredTeam,NBAStreaks)
+NBAPR <- PowerRanking %>% 
+  select(Team, Rank,TeamStrength, PlayerStrength, SchedRating,PredRating)%>% 
+  mutate(Rating = Rank) %>% 
+  mutate(Rank = c(1:30)) %>% 
+  select(Rank, Team,TeamStrength, PlayerStrength, SchedRating,PredRating, Rating) %>%
+  mutate(TeamStrength = round(TeamStrength,3))%>%
+  mutate(PlayerStrength = round(PlayerStrength,3))%>%
+  mutate(SchedRating = round(SchedRating,3))%>%
+  mutate(PredRating = round(PredRating,3))%>%
+  mutate(Rating = round(Rating,3))
+write_csv(NBAMVP,"/Users/seanfloersch/FloStrength/FloStrengthApp/NBAMVPRank")
+write_csv(NBAPR,"/Users/seanfloersch/FloStrength/FloStrengthApp/NBAPowerRank")
+if (isthereNBAtoday == "yes"){
+  todgameID <- getDate(x)
+  predToday <- predictNBAtoday(PowerRanking, todgameID)
+  write_csv(predToday, "/Users/seanfloersch/FloStrength/NBAFloStrength/yestmodpred")
+  NBAtodaydf <- predToday %>% 
+    select(AwayTeam,HomeTeam,gameID,BookWin,logpred, rfpred, gbmpred, nnpred, svmpred) %>%
+    mutate(GbmWin = ifelse(gbmpred ==1,AwayTeam,HomeTeam)) %>%
+    mutate(RfWin = ifelse(rfpred ==1,AwayTeam,HomeTeam)) %>%
+    mutate(NnWin = ifelse(nnpred ==1,AwayTeam,HomeTeam)) %>%
+    mutate(LogWin = ifelse(logpred ==1,AwayTeam,HomeTeam)) %>%
+    mutate(SvmWin = ifelse(svmpred ==1,AwayTeam,HomeTeam)) %>%
+    mutate(Game = str_c(AwayTeam, " @ ", HomeTeam, sep = ""))%>%
+    select(Game, BookWin, LogWin, NnWin, SvmWin, RfWin, GbmWin)
+  predictNBABets()
+}
+```
+
+``` {r nhl}
+source("/Users/seanfloersch/FloStrength/FloStrengthApp/NHLFunctions.R")
+if (wasNHLyest == "yes"){
+  yestdate <- getyestDate(x)
+  NHLGames <- unique(getNHLResults(yestdate))
+  write_csv(NHLGames, "/Users/seanfloersch/FloStrength/NHLFloStrength/NHLGames2223")
+  
+  NHLModdf <- unique(updYestNHL(NHLGames, yestdate))
+  write_csv(NHLModdf, "/Users/seanfloersch/FloStrength/NHLFloStrength/NHLModelComp")
+  yestbetsNHL <- read.csv("/Users/seanfloersch/FloStrength/NHLFloStrength/NHLmodpredyest")
+  if (length(yestbetsNHL$Game)>0){
+    NHLBetDF <- unique(updNHLBets(NHLModdf,yestdate, yestbetsNHL))
+    write_csv(NHLBetDF, "/Users/seanfloersch/FloStrength/NHLFloStrength/NHLBetsDF")
+  }
+} else {
+  NHLModdf <- read.csv("/Users/seanfloersch/FloStrength/NHLFloStrength/NHLModelComp")
+  NHLGames <- read.csv("/Users/seanfloersch/FloStrength/NHLFloStrength/NHLGames2223")
+}
+NHLPlayers <- getNHLPlayer(x)
+NHLMaster <- getNHLMaster(NHLGames, NHLPlayers)
+if (isNHLtoday == "yes"){
+  toddate <- getDate(x)
+  NHLPredTod <- getNHLPredictions(toddate,NHLMaster)
+  write_csv(NHLPredTod, "/Users/seanfloersch/FloStrength/NHLFloStrength/NHLPredyest")
+  NHLmodpred <- predictNHLModel(NHLPredTod, toddate)
+  write_csv(NHLmodpred, "/Users/seanfloersch/FloStrength/NHLFloStrength/NHLmodpredyest")
+} else{
+  print("No NHL Games Today")
+}
+NHLMVP<- NHLPlayers %>%
+  arrange(-Value) %>%
+  slice(1:300) %>%
+  select(Player, Pos, Tm, FloStrength, Value)  %>%
+  mutate(FloStrength = round(FloStrength,3))%>%
+  mutate(Value = round(Value,3))
+write_csv(NHLMVP,"/Users/seanfloersch/FloStrength/FloStrengthApp/NHLMVP")
+NHLPR <- NHLMaster %>%
+  arrange(-FloStrength) %>%
+  mutate(Rank = c(1:32)) %>%
+  select(Rank, Team, FloStrength, PlayerScore, TeamScore, SchedScore) %>%
+  mutate(FloStrength = round(FloStrength,3))%>%
+  mutate(PlayerScore = round(PlayerScore,3))%>%
+  mutate(TeamScore = round(TeamScore,3))%>%
+  mutate(SchedScore = round(SchedScore,3))
+write_csv(NHLPR,"/Users/seanfloersch/FloStrength/FloStrengthApp/NHLPowerRank")
+
+```
+
+```{r ncaamb}
+source("/Users/seanfloersch/FloStrength/FloStrengthApp/NCAAMBFunctions.R")
+if (ncaabyest == "yes"){
+  yestdate <- getyestDate(x)
+  NCAAMBResultsDF <- updateNCAAMBResults(yestdate)
+  write_csv(NCAAMBResultsDF, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/NCAAMBResultsDF")
+  NCAAMBModDF<-updateNCAAMBModDF(NCAAMBResultsDF,yestdate)
+  write_csv(NCAAMBModDF, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/NCAAMBModDF")
+  BetDF<- updateBetDf(NCAAMBModDF,yestdate)
+  write_csv(BetDF, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/BetDFncaamb")
+} else{
+  NCAAMBResultsDF<- read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/NCAAMBResultsDF")
+  NCAAMBModDF<- read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/NCAAMBModDF")
+  BetDF<- read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/BetDFncaamb")
+}
+if (ncaabtod == "yes"){
+  toddate <- getDate(x)
+  ncaab <- getNCAAMBTeam(NCAAMBResultsDF)
+  write_csv(ncaab, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/ncaambmaster")
+  ncaambpred <- predictNCAAMBgames(toddate, ncaab)
+write_csv(ncaambpred, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/NCAAMByestpred")
+games2watch <- predModelNCAAMB(ncaambpred, todgameID)
+write_csv(games2watch, "/Users/seanfloersch/FloStrength/NCAAMBFloStrength/games2watchyest")
+} else {
+  ncaab<- read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/ncaambmaster")
+}
+TOP25 <- ncaab %>%
+  mutate(Record = str_c(W,L, sep = "-")) %>%
+  select(Team, Record, TmRating) %>%
+  arrange(-TmRating) %>%
+  mutate(TmRating = round(TmRating,3))
+write_csv(TOP25,"/Users/seanfloersch/FloStrength/FloStrengthApp/NCAAMBPowerRank")
+```
+
+```{r dailybets, warning=FALSE, include=FALSE, echo=FALSE,message=FALSE }
+nbadf <-read.csv("/Users/seanfloersch/FloStrength/NBAFloStrength/NBABetsDF")
+nhldf <- read.csv("/Users/seanfloersch/FloStrength/NHLFloStrength/NHLBetsDF") %>%
+  group_by(Date) %>%
+  mutate(sumEarn = sum(Earnings))%>%
+  slice(1) %>%
+  ungroup() %>%
+  select(Date, sumEarn)%>%
+  mutate(Net = ifelse(sumEarn>0, "pos", "neg"))%>%
+  mutate(Earn = round(as.numeric(sumEarn),3)) %>%
+  mutate(Date = as.character(Date)) %>%
+  select("Day"="Date",Earn,Net) %>%
+  mutate(Sport = "NHL") %>%
+  na.omit()
+ncaadf<- read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/BetDFncaamb") 
+betdf <- rbind(nbadf,nhldf,ncaadf)
+write_csv(betdf,"/Users/seanfloersch/FloStrength/FloStrengthApp/betsdata")
+
+nba <- read.csv("/Users/seanfloersch/FloStrength/NBAFloStrength/nbayestbetdf") %>%
+  mutate(Sport = "NBA") %>%
+  select(Sport,Game, BookWin, Spread, Bet, Earnings)
+ncaa <-read.csv("/Users/seanfloersch/FloStrength/NCAAMBFloStrength/games2watchyest")%>%
+  mutate(Sport = "NCAAMB") %>%
+  mutate(type = as.numeric(Bet)) %>%
+  mutate(Earnings = ifelse(is.na(type)==TRUE, (exp(abs(spread))^.125),.91)) %>%
+  mutate(Earnings=round(Earnings,2)) %>%
+  select(Sport,Game, BookWin, "Spread"="spread", Bet, Earnings)
+nhl <- read.csv("/Users/seanfloersch/FloStrength/NHLFloStrength/NHLmodpredyest") %>%
+  mutate(Sport = "NHL") %>%
+  select(Sport,Game, BookWin, "Spread"="BookSpread", Bet, Earnings)
+betdf<- rbind(nba,ncaa,nhl)
+write_csv(betdf,"/Users/seanfloersch/FloStrength/FloStrengthApp/todaybets")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
